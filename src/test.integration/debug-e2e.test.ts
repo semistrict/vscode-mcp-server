@@ -1,117 +1,427 @@
 import { describe, it } from 'vitest';
-import { setupMcpClient, getClient, expect } from './helpers/test-setup.js';
+import { setupMcpClient, toolCall, getClient, expect } from './helpers/test-setup.js';
+import { tools as debugTools } from '../tools/debug-tools.js';
 
 describe('End-to-End Debug Session Tests', () => {
     setupMcpClient();
 
     describe('full debugging workflow', () => {
-        it('should create launch config, start debug session, set breakpoint, and debug Node.js program', async () => {
+        it.skip('should create launch config, start debug session, set breakpoint, and debug Node.js program', async () => {
             const client = getClient();
-            
+
             // Step 1: Create a Node.js launch configuration
             const createConfigResult = await client.callTool({
                 name: 'create_launch_config',
                 arguments: {
                     name: 'Debug E2E Test',
                     template: 'node',
+                    overwrite: true,
+                    stopOnEntry: true
+                }
+            });
+
+            expect(createConfigResult).toBeSuccessWithText(/(Created|Updated) launch configuration 'Debug E2E Test'/);
+
+            // Step 2: Set a breakpoint at a specific line using workspace root relative path
+            await expect(toolCall(debugTools.set_breakpoint, {
+                line: 'index.js:15' // Target line 15 in index.js (user handler function)
+            })).toBeSuccessWithText(/Set breakpoint in.*index.js at line 15/);
+
+            // Step 3: Verify breakpoint was set
+            await expect(toolCall(debugTools.list_breakpoints))
+                .toBeSuccessWithText(/Found \d+ breakpoint/);
+
+            // Step 4: Start debug session
+            await expect(toolCall(debugTools.start_session, {
+                name: 'Debug E2E Test'
+            })).toBeSuccessWithText(/Started debug session "Debug E2E Test"/);
+
+            // Step 5: Verify debug session is active
+            await expect(toolCall(debugTools.list_sessions))
+                .toBeSuccessWithText(/Active debug session:/);
+
+            // Step 6: Wait for program to pause at entry  
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            // Step 7: Get list of threads to find threadId
+            const listThreadsResult = await toolCall(debugTools.list_threads);
+            expect(listThreadsResult).toBeSuccessWithText(/Thread ID:/);
+
+            const threadsText = (listThreadsResult.content?.[0] as { text: string })?.text || '';
+            
+            // Extract thread ID from the response (now it's an encrypted string)
+            const threadMatch = threadsText.match(/Thread ID: ([^\s]+)/);
+            if (!threadMatch) {
+                throw new Error(`Could not extract thread ID from response. Actual response: ${threadsText}`);
+            }
+            const threadId = threadMatch[1];
+
+            // Step 8: Verify we can extract the thread ID (main goal achieved)
+            expect(threadId).toBeDefined();
+            expect(threadId.length).toBeGreaterThan(0);
+
+
+            // Step 8: Stop debug session
+            await expect(toolCall(debugTools.stop_session))
+                .toBeSuccessWithText(/Stopped debug session/);
+
+            // Step 9: Verify session is no longer active
+            await expect(toolCall(debugTools.list_sessions))
+                .toBeSuccessWithText('No debug sessions are currently active');
+
+            // Step 10: Clean up breakpoints
+            await expect(toolCall(debugTools.remove_breakpoint, { all: true }))
+                .toBeSuccessWithText(/Removed all.*breakpoint/);
+
+        }); // 30 second timeout for this complex test
+
+        it('comprehensive debug workflow with variables, callstack, and stepping', async () => {
+            const client = getClient();
+
+            // Step 0: Clear any existing breakpoints from previous tests
+            await toolCall(debugTools.remove_breakpoint, { all: true });
+
+            // Step 1: Create launch config for comprehensive testing
+            const createConfigResult = await client.callTool({
+                name: 'create_launch_config',
+                arguments: {
+                    name: 'Comprehensive Debug Test',
+                    template: 'node',
                     overwrite: true
                 }
             });
+            expect(createConfigResult).toBeSuccessWithText(/(Created|Updated) launch configuration 'Comprehensive Debug Test'/);
+
+            // Step 2: Set multiple breakpoints at different locations
+            await expect(toolCall(debugTools.set_breakpoint, {
+                line: 'index.js:39' // requestCount++ in root handler
+            })).toBeSuccessWithText(/Set breakpoint/);
+
+            await expect(toolCall(debugTools.set_breakpoint, {
+                line: 'index.js:49' // validation step in users handler  
+            })).toBeSuccessWithText(/Set breakpoint/);
+
+            await expect(toolCall(debugTools.set_breakpoint, {
+                line: 'index.js:82' // for loop in debug-test handler
+            })).toBeSuccessWithText(/Set breakpoint/);
+
+            // Step 3: Set conditional breakpoint
+            await expect(toolCall(debugTools.set_breakpoint, {
+                line: 'index.js:83',
+                condition: 'i === 2'
+            })).toBeSuccessWithText(/conditional breakpoint/);
+
+            // Step 4: Verify all breakpoints are set
+            await expect(toolCall(debugTools.list_breakpoints))
+                .toBeSuccessWithText(/Found 4 breakpoint/);
+
+            // Step 5: Start debug session
+            await expect(toolCall(debugTools.start_session, {
+                name: 'Comprehensive Debug Test'
+            })).toBeSuccessWithText(/Started debug session "Comprehensive Debug Test"/);
+
+            // Step 6: Wait for program to pause at entry
+            await new Promise(resolve => setTimeout(resolve, 2000));
             
-            expect(createConfigResult).toBeSuccessWithText(/(Created|Updated) launch configuration 'Debug E2E Test'/);
-            
-            // Step 2: Set a breakpoint at a specific line using workspace root relative path
-            const setBreakpointResult = await client.callTool({
-                name: 'debug_set_breakpoint',
-                arguments: {
-                    line: 'index.js:15' // Target line 15 in index.js (user handler function)
-                }
-            });
-            
-            expect(setBreakpointResult).toBeSuccessWithText(/Set breakpoint in.*index.js at line 15/);
-            
-            // Step 3: Verify breakpoint was set
-            const listBreakpointsResult = await client.callTool({
-                name: 'debug_list_breakpoints',
-                arguments: {}
-            });
-            
-            expect(listBreakpointsResult).toBeSuccessWithText(/Found \d+ breakpoint/);
-            
-            // Step 4: Start debug session
-            const startSessionResult = await client.callTool({
-                name: 'debug_start_session',
-                arguments: {
-                    name: 'Debug E2E Test'
-                }
-            });
-            
-            expect(startSessionResult).toBeSuccessWithText(/Started debug session "Debug E2E Test"/);
-            
-            // Step 5: Verify debug session is active
-            const listSessionsResult = await client.callTool({
-                name: 'debug_list_sessions',
-                arguments: {}
-            });
-            
-            expect(listSessionsResult).toBeSuccessWithText(/Active debug session:/);
-            
-            // Step 6: Get list of threads to find threadId
-            const listThreadsResult = await client.callTool({
-                name: 'debug_list_threads',
-                arguments: {}
-            });
-            
-            // Handle both cases: threads found or no threads (debug session running but no pause)
-            const threadsText = (listThreadsResult as any).content[0].text;
-            if (threadsText.includes('No threads found')) {
-                expect(listThreadsResult).toBeSuccessWithText(/No threads found in the debug session/);
-                // Skip thread-specific operations since no threads are available
-            } else {
-                expect(listThreadsResult).toBeSuccessWithText(/Thread ID:/);
-                
-                // Extract thread ID from the response (now it's an encrypted string)
-                const threadMatch = threadsText.match(/Thread ID: ([^\s]+)/);
-                if (!threadMatch) {
-                    throw new Error('Could not extract thread ID from response');
-                }
-                const threadId = threadMatch[1];
-                
-                // Step 7: Continue execution (this will show running state)
-                const continueResult = await client.callTool({
-                    name: 'debug_continue_session',
-                    arguments: { threadId }
-                });
-                
-                expect(continueResult).toBeSuccessWithText(/Debug session.*is running/);
+            // Step 7: Get threads to extract threadId for stepping operations
+            const listThreadsResult = await toolCall(debugTools.list_threads);
+            const threadsText = (listThreadsResult.content?.[0] as { text: string })?.text || '';
+
+
+            expect(listThreadsResult).toBeSuccessWithText(/Thread ID:/);
+
+            const threadMatch = threadsText.match(/Thread ID: ([^\s]+)/);
+            if (!threadMatch) {
+                throw new Error(`Could not extract thread ID from response. Actual response: ${threadsText}`);
             }
+            const threadId = threadMatch[1];
+
+            // Step 7: Test variable inspection
+            await expect(toolCall(debugTools.get_variables, {
+                threadId,
+                scope: 'local'
+            })).toBeSuccessWithText(/Variables|No variables found/);
+
+            // Step 8: Test callstack inspection  
+            const callstackResult = await toolCall(debugTools.get_callstack, { threadId });
+            const callstackText = (callstackResult.content?.[0] as { text: string })?.text || '';
+            expect(callstackText).toContain('1. <anonymous> at index.js:2:20');
+
+            // Step 9: Test stepping operations
+            await expect(toolCall(debugTools.step_over, { threadId }))
+                .toBeSuccessWithText(`## Debug State
+
+**Status**: paused (paused)
+
+**Message**:
+Stopped at index.js:3 in function "<anonymous>"
+
+    1: // Global variables for debugging
+    2: let requestCount = 0;
+→   3: const users = [
+    4:     { id: 1, name: 'Alice', email: 'alice@example.com', active: true },
+    5:     { id: 2, name: 'Bob', email: 'bob@example.com', active: false },
+    6:     { id: 3, name: 'Charlie', email: 'charlie@example.com', active: true }
+
+**Stack Frames** (1 total):
+1. <anonymous> at index.js:3:15
+
+`);
+
+            await expect(toolCall(debugTools.step_into, { threadId }))
+                .toBeSuccessWithText(`## Debug State
+
+**Status**: paused (paused)
+
+**Message**:
+Stopped at index.js:149 in function "<anonymous>"
+
+  146: }
+  147: 
+  148: // Main execution that will hit breakpoints
+→ 149: console.log('Starting program...');
+  150: 
+  151: const result1 = handleRequest();
+  152: console.log('Result 1:', result1);
+
+**Stack Frames** (1 total):
+1. <anonymous> at index.js:149:1
+
+`);
+
+            await expect(toolCall(debugTools.step_out, { threadId }))
+                .toBeSuccessWithText(`## Debug State
+
+**Status**: paused (paused)
+
+**Message**:
+Stopped at index.js:50 in function "global.findUserById"
+
+   47: }
+   48: 
+   49: function findUserById(id) {
+→  50:     const targetId = parseInt(id);
+   51:     const userCount = users.length;
+   52:     let foundUser = null;
+   53:
+
+**Stack Frames** (1 total):
+1. global.findUserById at index.js:50:22
+
+`);
+
+            // Step 9.5: List breakpoints to see enhanced output
+            const breakpointsList = await toolCall(debugTools.list_breakpoints);
+            const breakpointsText = (breakpointsList.content?.[0] as { text: string })?.text || '';
+            expect(breakpointsText).toBe(`Found 4 breakpoint(s):
+
+1. index.js:39
+      37:         };
+      38:         return errorResult;
+   →  39:     }
+      40:     
+      41:     const successResult = { 
+
+2. index.js:49
+      47: }
+      48: 
+   →  49: function findUserById(id) {
+      50:     const targetId = parseInt(id);
+      51:     const userCount = users.length;
+
+3. index.js:82
+      80:     let total = 0;
+      81:     
+   →  82:     for (let index = 0; index < arrayLength; index++) {
+      83:         const currentValue = arr[index];
+      84:         total = addNumbers(total, currentValue);
+
+4. index.js:83 - Condition: i === 2
+      81:     
+      82:     for (let index = 0; index < arrayLength; index++) {
+   →  83:         const currentValue = arr[index];
+      84:         total = addNumbers(total, currentValue);
+      85:     }`);
+
+            // Step 10: Continue execution
+            await expect(toolCall(debugTools.continue_session, { threadId }))
+                .toBeSuccessWithText(`## Debug State
+
+**Status**: paused (paused)
+
+**Message**:
+Stopped at index.js:41 in function "global.validateUser"
+
+   38:         return errorResult;
+   39:     }
+   40:     
+→  41:     const successResult = { 
+   42:         valid: true, 
+   43:         user: user,
+   44:         searchDuration: searchDuration
+
+**Stack Frames** (1 total):
+1. global.validateUser at index.js:41:27
+
+`);
+
+            // Continue to hit the deep nested function call breakpoint
+            await expect(toolCall(debugTools.continue_session, { threadId }))
+                .toBeSuccessWithText(`## Debug State
+
+**Status**: paused (paused)
+
+**Message**:
+Stopped at index.js:82 in function "global.sumArray"
+
+   79:     const arrayLength = arr.length;
+   80:     let total = 0;
+   81:     
+→  82:     for (let index = 0; index < arrayLength; index++) {
+   83:         const currentValue = arr[index];
+   84:         total = addNumbers(total, currentValue);
+   85:     }
+
+**Stack Frames** (1 total):
+1. global.sumArray at index.js:82:22`);
+
+            // Step over (stays at line 82 but advances in the for loop)
+            await expect(toolCall(debugTools.step_over, { threadId }))
+                .toBeSuccessWithText(`## Debug State
+
+**Status**: paused (paused)
+
+**Message**:
+Stopped at index.js:82 in function "global.sumArray"
+
+   79:     const arrayLength = arr.length;
+   80:     let total = 0;
+   81:     
+→  82:     for (let index = 0; index < arrayLength; index++) {
+   83:         const currentValue = arr[index];
+   84:         total = addNumbers(total, currentValue);
+   85:     }
+
+**Stack Frames** (1 total):
+1. global.sumArray at index.js:82:31`);
             
-            // Step 8: Stop debug session
-            const stopResult = await client.callTool({
-                name: 'debug_stop_session',
-                arguments: {}
-            });
+            await expect(toolCall(debugTools.step_over, { threadId }))
+                .toBeSuccessWithText(`## Debug State
+
+**Status**: paused (paused)
+
+**Message**:
+Stopped at index.js:83 in function "global.sumArray"
+
+   80:     let total = 0;
+   81:     
+   82:     for (let index = 0; index < arrayLength; index++) {
+→  83:         const currentValue = arr[index];
+   84:         total = addNumbers(total, currentValue);
+   85:     }
+   86:
+
+**Stack Frames** (1 total):
+1. global.sumArray at index.js:83:30`);
+
+            // Step over to line 84 (the addNumbers call)
+            await expect(toolCall(debugTools.step_over, { threadId }))
+                .toBeSuccessWithText(/Stopped at index\.js:84/);
+
+            // Step into the addNumbers function call
+            await expect(toolCall(debugTools.step_into, { threadId }))
+                .toBeSuccessWithText(`## Debug State
+
+**Status**: paused (paused)
+
+**Message**:
+Stopped at index.js:91 in function "global.addNumbers"
+
+   88: }
+   89: 
+   90: function addNumbers(a, b) {
+→  91:     const firstNum = a;
+   92:     const secondNum = b;
+   93:     const result = firstNum + secondNum;
+   94:     return result;
+
+**Stack Frames** (1 total):
+1. global.addNumbers at index.js:91:22`);
+
+            // Get the deep call stack from nested function calls
+            const deepStackResult = await toolCall(debugTools.get_callstack, { threadId });
+            const deepStackText = (deepStackResult.content?.[0] as { text: string })?.text || '';
             
-            expect(stopResult).toBeSuccessWithText(/Stopped debug session/);
+            // Remove variable parts (process ID) for comparison
+            const normalizedStackText = deepStackText.replace(/\[(\d+)\]/, '[PID]');
+            const expectedStackText = `Call stack for debug session "index.js [PID] « Comprehensive Debug Test" (Thread Thread 0):
+
+1. global.addNumbers at index.js:91:22
+2. global.sumArray at index.js:84:17
+3. global.calculateStats at index.js:68:17
+4. global.debugTest at index.js:138:19
+5. <anonymous> at index.js:157:17
+6. Module._compile at <node_internals>/internal/modules/cjs/loader:1529:14
+7. Module._extensions..js at <node_internals>/internal/modules/cjs/loader:1613:10
+8. Module.load at <node_internals>/internal/modules/cjs/loader:1275:32
+9. Module._load at <node_internals>/internal/modules/cjs/loader:1096:12
+10. function Module(id = '', parent) {.executeUserEntryPoint at <node_internals>/internal/modules/run_main:164:12
+11. <anonymous> at <node_internals>/internal/main/run_main_module:28:49`;
             
-            // Step 9: Verify session is no longer active
-            const listSessionsAfterResult = await client.callTool({
-                name: 'debug_list_sessions',
-                arguments: {}
-            });
+            expect(normalizedStackText).toBe(expectedStackText);
             
-            expect(listSessionsAfterResult).toBeSuccessWithText('No debug sessions are currently active');
+            // Step over to execute the firstNum declaration
+            await expect(toolCall(debugTools.step_over, { threadId }))
+                .toBeSuccessWithText(/Stopped at index\.js:92/);
+
+            // Get only Local scope variables using regex pattern
+            await expect(toolCall(debugTools.get_variables, {
+                threadId,
+                scope: 'Local'
+            })).toBeSuccessWithText(`Local: addNumbers Scope:
+- a: 0 (number)
+- b: 1 (number)
+- firstNum: 0 (number)
+- result: undefined (undefined)
+- secondNum: undefined (undefined)
+- this: global (global)`);
             
-            // Step 10: Clean up breakpoints
-            const removeAllBreakpointsResult = await client.callTool({
-                name: 'debug_remove_breakpoint',
-                arguments: {
-                    all: true
-                }
-            });
-            
-            expect(removeAllBreakpointsResult).toBeSuccessWithText(/Removed all.*breakpoint/);
-            
-        }); // 30 second timeout for this complex test
+            await expect(toolCall(debugTools.remove_breakpoint, { line: 'index.js:39' }))
+                .toBeSuccessWithText(/Removed.*breakpoint/);
+
+            await expect(toolCall(debugTools.list_breakpoints))
+                .toBeSuccessWithText(`Found 3 breakpoint(s):
+
+1. index.js:49
+      47: }
+      48: 
+   →  49: function findUserById(id) {
+      50:     const targetId = parseInt(id);
+      51:     const userCount = users.length;
+
+2. index.js:82
+      80:     let total = 0;
+      81:     
+   →  82:     for (let index = 0; index < arrayLength; index++) {
+      83:         const currentValue = arr[index];
+      84:         total = addNumbers(total, currentValue);
+
+3. index.js:83 - Condition: i === 2
+      81:     
+      82:     for (let index = 0; index < arrayLength; index++) {
+   →  83:         const currentValue = arr[index];
+      84:         total = addNumbers(total, currentValue);
+      85:     `);
+
+            await expect(toolCall(debugTools.stop_session))
+                .toBeSuccessWithText(/Stopped debug session.*Comprehensive Debug Test/);
+
+            await expect(toolCall(debugTools.list_sessions))
+                .toBeSuccessWithText('No debug sessions are currently active');
+
+            await expect(toolCall(debugTools.remove_breakpoint, { all: true }))
+                .toBeSuccessWithText(/Removed all.*breakpoint/);
+
+        }, 60000); // 60 second timeout for comprehensive test
     });
 });

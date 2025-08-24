@@ -29,8 +29,7 @@ export interface DebugStateResult {
  */
 export function toMarkdown(result: DebugStateResult): string {
     let markdown = `## Debug State\n\n`;
-    markdown += `**Status**: ${result.state} (${result.isPaused ? 'paused' : 'running'})\n`;
-    markdown += `**Wait Time**: ${result.waitTime}ms\n\n`;
+    markdown += `**Status**: ${result.state} (${result.isPaused ? 'paused' : 'running'})\n\n`;
     
     if (result.error) {
         markdown += `**Error**: ${result.error}\n\n`;
@@ -173,7 +172,17 @@ export class TypedThread {
     /**
      * Get variables for this thread (from top stack frame)
      */
-    async getVariables(scope: 'local' | 'global' | 'all' = 'all'): Promise<Array<{ scope: string; variables: DebugProtocol.Variable[] }>> {
+    async getVariables(scopePattern?: string): Promise<Array<{ scope: string; variables: DebugProtocol.Variable[] }>> {
+        // Compile and validate regex early if pattern is provided
+        let scopeRegex: RegExp | undefined;
+        if (scopePattern) {
+            try {
+                scopeRegex = new RegExp(scopePattern, 'i'); // Case insensitive
+            } catch (error) {
+                throw new Error(`Invalid scope pattern regex: ${error instanceof Error ? error.message : 'Unknown error'}`);
+            }
+        }
+
         const stackTrace = await this.getStackTrace(0, 1);
         if (!stackTrace.stackFrames || stackTrace.stackFrames.length === 0) {
             throw new Error('No stack frames available');
@@ -185,10 +194,9 @@ export class TypedThread {
         const variables: Array<{ scope: string; variables: DebugProtocol.Variable[] }> = [];
         
         for (const scopeInfo of scopes.scopes) {
-            // Filter by requested scope
-            if (scope !== 'all') {
-                if (scope === 'local' && scopeInfo.name.toLowerCase() !== 'local') continue;
-                if (scope === 'global' && scopeInfo.name.toLowerCase() !== 'global') continue;
+            // Filter by scope pattern if provided
+            if (scopeRegex && !scopeRegex.test(scopeInfo.name)) {
+                continue;
             }
 
             const scopeVars = await this.session.getVariables(scopeInfo.variablesReference);
@@ -245,8 +253,27 @@ export class TypedDebugSession {
 
     /**
      * Get list of threads as TypedThread instances
+     * Polls for up to 5 seconds if no threads are initially found
      */
     async getThreads(): Promise<TypedThread[]> {
+        const maxPollTime = 5000; // 5 seconds
+        const pollInterval = 200; // 200ms
+        const startTime = Date.now();
+        
+        while (Date.now() - startTime < maxPollTime) {
+            try {
+                const response = await this.getThreadsRaw();
+                if (response.threads && response.threads.length > 0) {
+                    return response.threads.map(thread => new TypedThread(thread, this));
+                }
+            } catch (error) {
+                // Debug adapter might not be ready yet, continue polling
+            }
+            
+            await new Promise(resolve => setTimeout(resolve, pollInterval));
+        }
+        
+        // Final attempt after polling timeout
         const response = await this.getThreadsRaw();
         return response.threads.map(thread => new TypedThread(thread, this));
     }

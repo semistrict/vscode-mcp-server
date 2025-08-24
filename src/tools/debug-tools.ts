@@ -3,6 +3,25 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from 'zod';
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { TypedDebugSession, createTypedDebugSession, toMarkdown } from './debug-types.js';
+import { defineTool } from '../utils/types.js';
+
+// Common schemas
+const fileLineSchema = z.string().describe('File and line in format "path:linenumber" where path is relative to workspace root (e.g., "main.go:25", "cmd/cli/main.go:30", "internal/handlers/users.go:15")');
+const breakpointIndexSchema = z.number().describe('Breakpoint index from list (1-based)');
+const allBreakpointsSchema = z.boolean().describe('Apply to all breakpoints if true');
+const threadIdSchema = z.string().describe('Thread ID from debug_list_threads output');
+
+// Common breakpoint targeting schema
+const breakpointTargetSchema = {
+    line: fileLineSchema.optional(),
+    index: breakpointIndexSchema.optional(), 
+    all: allBreakpointsSchema.optional()
+};
+
+// Common thread-based operation schema
+const threadOperationSchema = {
+    threadId: threadIdSchema
+};
 
 /**
  * Utility function to ensure there is an active debug session
@@ -16,6 +35,107 @@ function requireActiveDebugSession(): TypedDebugSession {
     return createTypedDebugSession(activeSession);
 }
 
+/**
+ * Helper to create a standardized CallToolResult response
+ */
+function createResponse(text: string): CallToolResult {
+    return {
+        content: [{
+            type: 'text',
+            text
+        }]
+    };
+}
+
+/**
+ * Parse file:line format and validate
+ */
+function parseFileLine(line: string): { filename: string; lineNumber: number } {
+    const match = line.match(/^(.+):(\d+)$/);
+    if (!match) {
+        throw new Error('Line format must be "filename:linenumber" (e.g., "main.go:25")');
+    }
+    
+    const [, filename, lineStr] = match;
+    const lineNumber = parseInt(lineStr, 10);
+    
+    if (lineNumber < 1) {
+        throw new Error('Line number must be >= 1');
+    }
+    
+    return { filename, lineNumber };
+}
+
+/**
+ * Find breakpoints matching file:line criteria
+ */
+function findBreakpointsByLine(breakpoints: readonly vscode.Breakpoint[], filename: string, lineNumber: number): vscode.SourceBreakpoint[] {
+    const targetLine = lineNumber - 1; // Convert to 0-based
+    
+    return breakpoints.filter(bp => {
+        if (bp instanceof vscode.SourceBreakpoint) {
+            const bpLocation = bp.location;
+            const bpPath = vscode.workspace.asRelativePath(bpLocation.uri);
+            const bpLine = bpLocation.range.start.line;
+            
+            return (bpPath.endsWith(filename) || bpPath === filename) && bpLine === targetLine;
+        }
+        return false;
+    }) as vscode.SourceBreakpoint[];
+}
+
+/**
+ * Validate breakpoint target parameters (exactly one must be provided)
+ */
+function validateBreakpointTarget(line?: string, index?: number, all?: boolean): void {
+    const paramCount = [line, index, all].filter(p => p !== undefined).length;
+    if (paramCount !== 1) {
+        throw new Error('Must specify exactly one of "line", "index", or "all" parameters');
+    }
+}
+
+
+// Tool definitions for typed testing
+export const tools = {
+    set_breakpoint: defineTool('debug_set_breakpoint', {
+        line: z.string().optional().describe('File and line in format "path:linenumber" where path is relative to workspace root (e.g., "main.go:25", "cmd/cli/main.go:30", "internal/handlers/users.go:15")'),
+        function: z.string().optional().describe('Function name to set breakpoint at (searches workspace for function)'),
+        condition: z.string().optional().describe('Optional condition for conditional breakpoint (e.g., "x > 5")'),
+        logMessage: z.string().optional().describe('Optional log message for logpoint instead of breakpoint')
+    }),
+    
+    list_breakpoints: defineTool('debug_list_breakpoints', {}),
+    
+    remove_breakpoint: defineTool('debug_remove_breakpoint', breakpointTargetSchema),
+    
+    
+    start_session: defineTool('debug_start_session', {
+        name: z.string().describe('Name of the launch configuration to use'),
+        folder: z.string().optional().describe('Workspace folder name (if multiple folders)')
+    }),
+    
+    stop_session: defineTool('debug_stop_session', {}),
+    
+    continue_session: defineTool('debug_continue_session', threadOperationSchema),
+    
+    list_sessions: defineTool('debug_list_sessions', {}),
+    
+    list_threads: defineTool('debug_list_threads', {}),
+    
+    get_variables: defineTool('debug_get_variables', {
+        ...threadOperationSchema,
+        scope: z.string().optional().describe('Regular expression pattern to match scope names (e.g., "local" for any scope containing "local", "Local:.*addNumbers" for locals of addNumbers function, "global" for global scope). If not provided, returns all scopes.')
+    }),
+    
+    get_callstack: defineTool('debug_get_callstack', threadOperationSchema),
+    
+    step_over: defineTool('debug_step_over', threadOperationSchema),
+    
+    step_into: defineTool('debug_step_into', threadOperationSchema),
+    
+    step_out: defineTool('debug_step_out', threadOperationSchema)
+};
+
 
 /**
  * Registers MCP debug-related tools with the server
@@ -24,7 +144,7 @@ function requireActiveDebugSession(): TypedDebugSession {
 export function registerDebugTools(server: McpServer): void {
     // Add debug_set_breakpoint tool
     server.tool(
-        'debug_set_breakpoint',
+        tools.set_breakpoint.name,
         `Sets a breakpoint in VS Code using either line-based or function-based targeting.
 
         WHEN TO USE: Setting breakpoints for debugging sessions, preparing debug environments.
@@ -33,12 +153,7 @@ export function registerDebugTools(server: McpServer): void {
         Function mode: Use function="functionName" to set breakpoint at function entry
         
         The tool will search the workspace to locate the target and set an appropriate breakpoint.`,
-        {
-            line: z.string().optional().describe('File and line in format "path:linenumber" where path is relative to workspace root (e.g., "main.go:25", "cmd/cli/main.go:30", "internal/handlers/users.go:15")'),
-            function: z.string().optional().describe('Function name to set breakpoint at (searches workspace for function)'),
-            condition: z.string().optional().describe('Optional condition for conditional breakpoint (e.g., "x > 5")'),
-            logMessage: z.string().optional().describe('Optional log message for logpoint instead of breakpoint')
-        },
+        tools.set_breakpoint.inputSchema,
         async ({ line, function: functionName, condition, logMessage }): Promise<CallToolResult> => {
             try {
                 // Validate input - exactly one of line or function must be provided
@@ -187,12 +302,7 @@ export function registerDebugTools(server: McpServer): void {
                 const breakpoints = vscode.debug.breakpoints;
                 
                 if (breakpoints.length === 0) {
-                    return {
-                        content: [{
-                            type: 'text',
-                            text: 'No breakpoints are currently set in the workspace.'
-                        }]
-                    };
+                    return createResponse('No breakpoints are currently set in the workspace.');
                 }
 
                 let result = `Found ${breakpoints.length} breakpoint(s):\n\n`;
@@ -220,17 +330,36 @@ export function registerDebugTools(server: McpServer): void {
                         }
                         
                         result += '\n';
+                        
+                        // Add source context
+                        try {
+                            const document = await vscode.workspace.openTextDocument(location.uri);
+                            const totalLines = document.lineCount;
+                            const targetLine = location.range.start.line; // 0-based
+                            
+                            // Get 2 lines before and after current line for context
+                            const contextLines = 2;
+                            const startLine = Math.max(0, targetLine - contextLines);
+                            const endLine = Math.min(totalLines, targetLine + contextLines + 1);
+                            
+                            for (let lineIdx = startLine; lineIdx < endLine; lineIdx++) {
+                                const lineText = document.lineAt(lineIdx).text;
+                                const lineNum = lineIdx + 1;
+                                const marker = lineIdx === targetLine ? '→' : ' ';
+                                result += `   ${marker} ${lineNum.toString().padStart(3)}: ${lineText}\n`;
+                            }
+                            
+                        } catch (fileError) {
+                            result += `   (source context unavailable: ${fileError instanceof Error ? fileError.message : 'unknown error'})\n`;
+                        }
+                        
+                        result += '\n';
                     } else {
-                        result += `${i + 1}. ${bp.constructor.name} breakpoint\n`;
+                        result += `${i + 1}. ${bp.constructor.name} breakpoint\n\n`;
                     }
                 }
 
-                return {
-                    content: [{
-                        type: 'text',
-                        text: result.trim()
-                    }]
-                };
+                return createResponse(result.trim());
                 
             } catch (error) {
                 console.error('[debug_list_breakpoints] Error:', error);
@@ -267,20 +396,10 @@ export function registerDebugTools(server: McpServer): void {
                 if (all) {
                     // Remove all breakpoints
                     if (breakpoints.length === 0) {
-                        return {
-                            content: [{
-                                type: 'text',
-                                text: 'No breakpoints are currently set in the workspace.'
-                            }]
-                        };
+                        return createResponse('No breakpoints are currently set in the workspace.');
                     }
                     vscode.debug.removeBreakpoints(breakpoints);
-                    return {
-                        content: [{
-                            type: 'text',
-                            text: `Removed all ${breakpoints.length} breakpoint(s) from the workspace.`
-                        }]
-                    };
+                    return createResponse(`Removed all ${breakpoints.length} breakpoint(s) from the workspace.`);
                 }
 
                 if (index !== undefined) {
@@ -308,12 +427,7 @@ export function registerDebugTools(server: McpServer): void {
                         description += ` (${relativePath}:${lineNum})`;
                     }
                     
-                    return {
-                        content: [{
-                            type: 'text',
-                            text: `Removed ${description}.`
-                        }]
-                    };
+                    return createResponse(`Removed ${description}.`);
                 }
 
                 if (line) {
@@ -349,12 +463,7 @@ export function registerDebugTools(server: McpServer): void {
                     
                     vscode.debug.removeBreakpoints(matchingBreakpoints);
                     
-                    return {
-                        content: [{
-                            type: 'text',
-                            text: `Removed ${matchingBreakpoints.length} breakpoint(s) at ${filename}:${lineNumber + 1}.`
-                        }]
-                    };
+                    return createResponse(`Removed ${matchingBreakpoints.length} breakpoint(s) at ${filename}:${lineNumber + 1}.`);
                 }
 
                 throw new Error('No valid removal criteria provided');
@@ -366,180 +475,6 @@ export function registerDebugTools(server: McpServer): void {
         }
     );
 
-    // Add debug_toggle_breakpoint tool
-    server.tool(
-        'debug_toggle_breakpoint',
-        `Toggles (enables/disables) a breakpoint without removing it.
-        
-        WHEN TO USE: Temporarily disabling breakpoints, debugging workflow management.
-        
-        Line mode: Use line="file.ext:123" format to toggle breakpoint at specific line
-        Index mode: Use index=1 to toggle breakpoint by its position in the list (from debug_list_breakpoints)
-        All mode: Use all=true with enabled=true/false to enable/disable all breakpoints`,
-        {
-            line: z.string().optional().describe('File and line in format "path:linenumber" where path is relative to workspace root (e.g., "main.go:25", "cmd/cli/main.go:30", "internal/handlers/users.go:15")'),
-            index: z.number().optional().describe('Breakpoint index from list (1-based)'),
-            all: z.boolean().optional().describe('Toggle all breakpoints if true'),
-            enabled: z.boolean().optional().describe('Explicitly set enabled state (only with all=true)')
-        },
-        async ({ line, index, all, enabled }): Promise<CallToolResult> => {
-            try {
-                // Validate input
-                const paramCount = [line, index, all].filter(p => p !== undefined).length;
-                if (paramCount !== 1) {
-                    throw new Error('Must specify exactly one of "line", "index", or "all" parameters');
-                }
-
-                if (enabled !== undefined && !all) {
-                    throw new Error('The "enabled" parameter can only be used with "all=true"');
-                }
-
-                const breakpoints = vscode.debug.breakpoints;
-                
-                if (breakpoints.length === 0) {
-                    return {
-                        content: [{
-                            type: 'text',
-                            text: 'No breakpoints are currently set in the workspace.'
-                        }]
-                    };
-                }
-
-                if (all) {
-                    // Toggle all breakpoints
-                    let newState: boolean;
-                    if (enabled !== undefined) {
-                        newState = enabled;
-                    } else {
-                        // If not specified, toggle based on majority state
-                        const enabledCount = breakpoints.filter(bp => bp.enabled).length;
-                        newState = enabledCount < breakpoints.length / 2;
-                    }
-                    
-                    // Remove all breakpoints and re-add with new state
-                    const updatedBreakpoints = breakpoints.map(bp => {
-                        if (bp instanceof vscode.SourceBreakpoint) {
-                            return new vscode.SourceBreakpoint(
-                                bp.location,
-                                newState,
-                                bp.condition,
-                                bp.hitCondition,
-                                bp.logMessage
-                            );
-                        }
-                        return bp;
-                    });
-                    
-                    vscode.debug.removeBreakpoints(breakpoints);
-                    vscode.debug.addBreakpoints(updatedBreakpoints);
-                    
-                    const stateText = newState ? 'enabled' : 'disabled';
-                    return {
-                        content: [{
-                            type: 'text',
-                            text: `${stateText} all ${breakpoints.length} breakpoint(s).`
-                        }]
-                    };
-                }
-
-                if (index !== undefined) {
-                    // Toggle by index
-                    if (index < 1 || index > breakpoints.length) {
-                        throw new Error(`Invalid breakpoint index ${index}. Valid range is 1-${breakpoints.length}.`);
-                    }
-                    
-                    const breakpointToToggle = breakpoints[index - 1]; // Convert to 0-based
-                    const newState = !breakpointToToggle.enabled;
-                    
-                    if (breakpointToToggle instanceof vscode.SourceBreakpoint) {
-                        const updatedBreakpoint = new vscode.SourceBreakpoint(
-                            breakpointToToggle.location,
-                            newState,
-                            breakpointToToggle.condition,
-                            breakpointToToggle.hitCondition,
-                            breakpointToToggle.logMessage
-                        );
-                        
-                        vscode.debug.removeBreakpoints([breakpointToToggle]);
-                        vscode.debug.addBreakpoints([updatedBreakpoint]);
-                        
-                        const location = breakpointToToggle.location;
-                        const relativePath = vscode.workspace.asRelativePath(location.uri);
-                        const lineNum = location.range.start.line + 1;
-                        const stateText = newState ? 'enabled' : 'disabled';
-                        
-                        return {
-                            content: [{
-                                type: 'text',
-                                text: `Breakpoint #${index} at ${relativePath}:${lineNum} ${stateText}.`
-                            }]
-                        };
-                    }
-                }
-
-                if (line) {
-                    // Toggle by file:line
-                    const match = line.match(/^(.+):(\d+)$/);
-                    if (!match) {
-                        throw new Error('Line format must be "filename:linenumber" (e.g., "main.go:25")');
-                    }
-                    
-                    const [, filename, lineStr] = match;
-                    const lineNumber = parseInt(lineStr, 10) - 1; // Convert to 0-based
-                    
-                    if (lineNumber < 0) {
-                        throw new Error('Line number must be >= 1');
-                    }
-                    
-                    // Find matching breakpoint
-                    const matchingBreakpoints = breakpoints.filter(bp => {
-                        if (bp instanceof vscode.SourceBreakpoint) {
-                            const bpLocation = bp.location;
-                            const bpPath = vscode.workspace.asRelativePath(bpLocation.uri);
-                            const bpLine = bpLocation.range.start.line;
-                            
-                            return (bpPath.endsWith(filename) || bpPath === filename) && 
-                                   bpLine === lineNumber;
-                        }
-                        return false;
-                    }) as vscode.SourceBreakpoint[];
-                    
-                    if (matchingBreakpoints.length === 0) {
-                        throw new Error(`No breakpoint found at ${filename}:${lineNumber + 1}`);
-                    }
-                    
-                    // Toggle all matching breakpoints
-                    const updatedBreakpoints = matchingBreakpoints.map(bp => {
-                        const newState = !bp.enabled;
-                        return new vscode.SourceBreakpoint(
-                            bp.location,
-                            newState,
-                            bp.condition,
-                            bp.hitCondition,
-                            bp.logMessage
-                        );
-                    });
-                    
-                    vscode.debug.removeBreakpoints(matchingBreakpoints);
-                    vscode.debug.addBreakpoints(updatedBreakpoints);
-                    
-                    const stateText = updatedBreakpoints[0].enabled ? 'enabled' : 'disabled';
-                    return {
-                        content: [{
-                            type: 'text',
-                            text: `${stateText} ${matchingBreakpoints.length} breakpoint(s) at ${filename}:${lineNumber + 1}.`
-                        }]
-                    };
-                }
-
-                throw new Error('No valid toggle criteria provided');
-                
-            } catch (error) {
-                console.error('[debug_toggle_breakpoint] Error:', error);
-                throw new Error(`Failed to toggle breakpoint: ${error}`);
-            }
-        }
-    );
 
     // Add debug_start_session tool
     server.tool(
@@ -674,12 +609,7 @@ export function registerDebugTools(server: McpServer): void {
             const activeSession = vscode.debug.activeDebugSession;
             
             if (!activeSession) {
-                return {
-                    content: [{
-                        type: 'text',
-                        text: 'No debug sessions are currently active'
-                    }]
-                };
+                return createResponse('No debug sessions are currently active');
             }
 
             const sessionInfo = `Active debug session:
@@ -688,12 +618,7 @@ export function registerDebugTools(server: McpServer): void {
 - Type: ${activeSession.type}
 - Workspace: ${activeSession.workspaceFolder?.name || 'N/A'}`;
 
-            return {
-                content: [{
-                    type: 'text',
-                    text: sessionInfo
-                }]
-            };
+            return createResponse(sessionInfo);
         }
     );
 
@@ -760,9 +685,9 @@ export function registerDebugTools(server: McpServer): void {
         Retrieves variables from the active debug session's current scope.`,
         {
             threadId: z.string().describe('Thread ID from debug_list_threads output'),
-            scope: z.enum(['local', 'global', 'all']).optional().describe('Variable scope to retrieve (default: all)')
+            scope: z.string().optional().describe('Regular expression pattern to match scope names (e.g., "local" for any scope containing "local", "Local:.*addNumbers" for locals of addNumbers function, "global" for global scope). If not provided, returns all scopes.')
         },
-        async ({ threadId, scope = 'all' }): Promise<CallToolResult> => {
+        async ({ threadId, scope }): Promise<CallToolResult> => {
             const activeSession = requireActiveDebugSession();
             const thread = activeSession.getThread(threadId);
 
@@ -848,23 +773,13 @@ export function registerDebugTools(server: McpServer): void {
         WHEN TO USE: Debugging line by line, stepping through code without entering function calls.
         
         Executes the current line and stops at the next line in the same function. Returns current debugging state with code context.`,
-        {
-            threadId: z.string().describe('Thread ID from debug_list_threads output')
-        },
+        tools.step_over.inputSchema,
         async ({ threadId }): Promise<CallToolResult> => {
             const activeSession = requireActiveDebugSession();
             const thread = activeSession.getThread(threadId);
-
             await thread.stepOver();
-
             const debugStateResult = await thread.waitUntilPausedAndGetState();
-
-            return {
-                content: [{
-                    type: 'text',
-                    text: toMarkdown(debugStateResult)
-                }]
-            };
+            return createResponse(toMarkdown(debugStateResult));
         }
     );
 
@@ -876,23 +791,13 @@ export function registerDebugTools(server: McpServer): void {
         WHEN TO USE: Debugging function internals, entering function calls for detailed inspection.
         
         Steps into the function call on the current line. Returns current debugging state with code context.`,
-        {
-            threadId: z.string().describe('Thread ID from debug_list_threads output')
-        },
+        tools.step_into.inputSchema,
         async ({ threadId }): Promise<CallToolResult> => {
             const activeSession = requireActiveDebugSession();
             const thread = activeSession.getThread(threadId);
-
             await thread.stepInto();
-
             const debugStateResult = await thread.waitUntilPausedAndGetState();
-
-            return {
-                content: [{
-                    type: 'text',
-                    text: toMarkdown(debugStateResult)
-                }]
-            };
+            return createResponse(toMarkdown(debugStateResult));
         }
     );
 
@@ -904,23 +809,13 @@ export function registerDebugTools(server: McpServer): void {
         WHEN TO USE: Exiting current function to return to caller, debugging at higher level.
         
         Continues execution until the current function returns. Returns current debugging state with code context.`,
-        {
-            threadId: z.string().describe('Thread ID from debug_list_threads output')
-        },
+        tools.step_out.inputSchema,
         async ({ threadId }): Promise<CallToolResult> => {
             const activeSession = requireActiveDebugSession();
             const thread = activeSession.getThread(threadId);
-
             await thread.stepOut();
-
             const debugStateResult = await thread.waitUntilPausedAndGetState();
-
-            return {
-                content: [{
-                    type: 'text',
-                    text: toMarkdown(debugStateResult)
-                }]
-            };
+            return createResponse(toMarkdown(debugStateResult));
         }
     );
 }

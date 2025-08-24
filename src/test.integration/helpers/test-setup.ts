@@ -2,6 +2,7 @@ import { beforeAll, afterAll, expect as vitestExpect } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { TextContent, CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { Awaitable, ToolDef, ToolArgs } from '../../utils/types.js';
 
 export interface TestContext {
     client: Client;
@@ -69,14 +70,32 @@ export function isErrorResponse(result: CallToolResult): boolean {
 }
 
 /**
+ * Helper to call MCP tool directly
+ */
+export async function callTool(toolName: string, args: any): Promise<CallToolResult> {
+    const client = getClient();
+    return await client.callTool({
+        name: toolName,
+        arguments: args
+    }) as CallToolResult;
+}
+
+/**
+ * Helper to create a tool call promise for use with custom matchers
+ * Only accepts typed ToolDef for full type safety
+ */
+export function toolCall<T extends ToolDef<any>>(
+    tool: T, 
+    args: ToolArgs<T> = {} as ToolArgs<T>
+): Promise<CallToolResult> {
+    return callTool(tool.name, args);
+}
+
+/**
  * Helper to call MCP tool and extract text response
  */
 export async function callToolForText(toolName: string, args: any): Promise<string> {
-    const client = getClient();
-    const result = await client.callTool({
-        name: toolName,
-        arguments: args
-    });
+    const result = await callTool(toolName, args);
     const textContent = extractTextContent(result);
     return textContent.text;
 }
@@ -164,29 +183,32 @@ vitestExpect.extend({
         };
     },
     
-    toBeError(received: CallToolResult) {
-        const isError = received.isError === true;
+    async toBeError(received: Awaitable<CallToolResult>) {
+        const result = await received;
+        const isError = result.isError === true;
         
         return {
             pass: isError,
-            message: () => `Expected result to ${isError ? 'not ' : ''}be an error response, but got isError: ${received.isError}`
+            message: () => `Expected result to ${isError ? 'not ' : ''}be an error response, but got isError: ${result.isError}`
         };
     },
     
-    toBeSuccess(received: CallToolResult) {
-        const isError = received.isError === true;
+    async toBeSuccess(received: Awaitable<CallToolResult>) {
+        const result = await received;
+        const isError = result.isError === true;
         
         return {
             pass: !isError,
-            message: () => `Expected result to ${!isError ? 'not ' : ''}be a success response, but got isError: ${received.isError}`
+            message: () => `Expected result to ${!isError ? 'not ' : ''}be a success response, but got isError: ${result.isError}`
         };
     },
     
-    toBeSuccessWithText(received: CallToolResult, expected: string | RegExp) {
-        const isError = received.isError === true;
+    async toBeSuccessWithText(received: Awaitable<CallToolResult>, expected: string | RegExp) {
+        const result = await received;
+        const isError = result.isError === true;
         
         if (isError) {
-            const errorContent = received.content?.find(c => c.type === 'text') as TextContent;
+            const errorContent = result.content?.find(c => c.type === 'text') as TextContent;
             const errorText = errorContent?.text || 'no error message';
             return {
                 pass: false,
@@ -194,7 +216,7 @@ vitestExpect.extend({
             };
         }
         
-        const textContent = received.content?.find(c => c.type === 'text') as TextContent;
+        const textContent = result.content?.find(c => c.type === 'text') as TextContent;
         if (!textContent) {
             return {
                 pass: false,
@@ -202,16 +224,24 @@ vitestExpect.extend({
             };
         }
         
-        const matches = expected instanceof RegExp
-            ? expected.test(textContent.text)
-            : textContent.text === expected;
-        
-        const expectedDesc = expected instanceof RegExp ? expected.toString() : `"${expected}"`;
-        
-        return {
-            pass: matches,
-            message: () => `Expected success response text to match ${expectedDesc}, but got "${textContent.text}"`
-        };
+        if (expected instanceof RegExp) {
+            const matches = expected.test(textContent.text);
+            return {
+                pass: matches,
+                message: () => `Expected success response text to match ${expected.toString()}, but got "${textContent.text}"`
+            };
+        } else {
+            // Use Vitest's built-in string comparison for better diff
+            try {
+                vitestExpect(textContent.text.trim()).toContain(expected.trim());
+                return { pass: true, message: () => '' };
+            } catch (error: any) {
+                return { 
+                    pass: false, 
+                    message: () => `Expected success response text to match, but:\nActual text:\n"${textContent.text}"\nExpected to contain:\n"${expected}"\nError: ${error.message}`
+                };
+            }
+        }
     }
 });
 

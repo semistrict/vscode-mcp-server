@@ -112,7 +112,8 @@
     "test": "vscode-test",
     "test:integration:prepare": "pnpm run compile && ./scripts/launch-test-env.sh",
     "test:integration:test-only": "vitest run src/test.integration --reporter=verbose --no-coverage --pool=threads --poolOptions.threads.singleThread",
-    "test:integration": "pnpm run test:integration:prepare && pnpm run test:integration:test-only"
+    "test:integration": "pnpm run test:integration:prepare && pnpm run test:integration:test-only",
+    "test:debug-e2e": "pnpm run test:integration:prepare && vitest run src/test.integration/debug-e2e.test.ts --reporter=verbose --no-coverage"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
