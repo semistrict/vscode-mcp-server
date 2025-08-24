@@ -28,7 +28,9 @@ function getToolConfiguration(): ToolConfiguration {
         edit: enabledTools.edit ?? true,
         shell: enabledTools.shell ?? true,
         diagnostics: enabledTools.diagnostics ?? true,
-        symbol: enabledTools.symbol ?? true
+        symbol: enabledTools.symbol ?? true,
+        extension: enabledTools.extension ?? true,
+        quickfix: enabledTools.quickfix ?? true
     };
 }
 
@@ -84,7 +86,7 @@ async function toggleServerState(context: vscode.ExtensionContext): Promise<void
     context.globalState.update('mcpServerEnabled', serverEnabled);
     
     const config = vscode.workspace.getConfiguration('vscode-mcp-server');
-    const port = config.get<number>('port') || 3000;
+    const port = config.get<number>('port') || 11331;
     
     // Update status bar immediately to provide feedback
     updateStatusBar(port);
@@ -154,7 +156,7 @@ export async function activate(context: vscode.ExtensionContext) {
         // Get configuration
         const config = vscode.workspace.getConfiguration('vscode-mcp-server');
         const defaultEnabled = config.get<boolean>('defaultEnabled') ?? false;
-        const port = config.get<number>('port') || 3000;
+        const port = config.get<number>('port') || 11331;
 
         // Load saved state or use configured default
         serverEnabled = context.globalState.get('mcpServerEnabled', defaultEnabled);
@@ -228,7 +230,7 @@ export async function activate(context: vscode.ExtensionContext) {
                     
                     // Start new server with updated configuration
                     const config = vscode.workspace.getConfiguration('vscode-mcp-server');
-                    const port = config.get<number>('port') || 3000;
+                    const port = config.get<number>('port') || 11331;
                     const terminal = getExtensionTerminal(context);
                     const toolConfig = getToolConfiguration();
                     

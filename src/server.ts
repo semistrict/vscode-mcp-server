@@ -9,6 +9,8 @@ import { registerEditTools } from './tools/edit-tools';
 import { registerShellTools } from './tools/shell-tools';
 import { registerDiagnosticsTools } from './tools/diagnostics-tools';
 import { registerSymbolTools } from './tools/symbol-tools';
+import { registerExtensionTools } from './tools/extension-tools';
+import { registerQuickfixTools } from './tools/quickfix-tools';
 import { logger } from './utils/logger';
 
 export interface ToolConfiguration {
@@ -17,6 +19,8 @@ export interface ToolConfiguration {
     shell: boolean;
     diagnostics: boolean;
     symbol: boolean;
+    extension: boolean;
+    quickfix: boolean;
 }
 
 export class MCPServer {
@@ -41,7 +45,9 @@ export class MCPServer {
             edit: true,
             shell: true,
             diagnostics: true,
-            symbol: true
+            symbol: true,
+            extension: true,
+            quickfix: true
         };
         this.app = express();
         this.app.use(express.json());
@@ -112,6 +118,22 @@ export class MCPServer {
                 logger.info('MCP symbol tools registered successfully');
             } else {
                 logger.info('MCP symbol tools disabled by configuration');
+            }
+            
+            // Register extension tools if enabled
+            if (this.toolConfig.extension) {
+                registerExtensionTools(this.server);
+                logger.info('MCP extension tools registered successfully');
+            } else {
+                logger.info('MCP extension tools disabled by configuration');
+            }
+            
+            // Register quickfix tools if enabled
+            if (this.toolConfig.quickfix) {
+                registerQuickfixTools(this.server);
+                logger.info('MCP quickfix tools registered successfully');
+            } else {
+                logger.info('MCP quickfix tools disabled by configuration');
             }
         } else {
             logger.warn('File listing callback not set during tools setup');
