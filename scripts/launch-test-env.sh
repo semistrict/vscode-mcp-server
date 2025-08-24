@@ -8,8 +8,8 @@ set -e
 # Get the directory of this script and the project root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-SOURCE_TEST_FIXTURES_DIR="$PROJECT_ROOT/test-fixtures/go-workspace"
-TEST_FIXTURES_DIR="$PROJECT_ROOT/.tmp/go-workspace"
+SOURCE_TEST_FIXTURES_DIR="$PROJECT_ROOT/test-fixtures/workspace"
+TEST_FIXTURES_DIR="$PROJECT_ROOT/.tmp/workspace"
 EXTENSION_DIR="$PROJECT_ROOT"
 
 echo "🚀 Launching VS Code test environment..."
@@ -64,9 +64,8 @@ rm -rf "$PROJECT_ROOT/.tmp/vscode-user-data"*
 
 mkdir -p "$USER_DATA_DIR"
 
-# Pre-install Go extension
-echo "📦 Installing Go extension..."
-code --user-data-dir="$USER_DATA_DIR" --install-extension golang.go
+# Node.js debugging is built into VS Code by default
+echo "📦 Node.js debugging is built into VS Code - no extension installation needed"
 
 # Launch VS Code with the extension in development mode and capture PID
 code \

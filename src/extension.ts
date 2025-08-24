@@ -30,7 +30,9 @@ function getToolConfiguration(): ToolConfiguration {
         diagnostics: enabledTools.diagnostics ?? true,
         symbol: enabledTools.symbol ?? true,
         extension: enabledTools.extension ?? true,
-        quickfix: enabledTools.quickfix ?? true
+        quickfix: enabledTools.quickfix ?? true,
+        debug: enabledTools.debug ?? true,
+        launchConfig: enabledTools.launchConfig ?? true
     };
 }
 

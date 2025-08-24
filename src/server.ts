@@ -11,6 +11,8 @@ import { registerDiagnosticsTools } from './tools/diagnostics-tools';
 import { registerSymbolTools } from './tools/symbol-tools';
 import { registerExtensionTools } from './tools/extension-tools';
 import { registerQuickfixTools } from './tools/quickfix-tools';
+import { registerDebugTools } from './tools/debug-tools';
+import { registerLaunchConfigTools } from './tools/launch-config-tools';
 import { logger } from './utils/logger';
 
 export interface ToolConfiguration {
@@ -21,6 +23,8 @@ export interface ToolConfiguration {
     symbol: boolean;
     extension: boolean;
     quickfix: boolean;
+    debug: boolean;
+    launchConfig: boolean;
 }
 
 export class MCPServer {
@@ -47,7 +51,9 @@ export class MCPServer {
             diagnostics: true,
             symbol: true,
             extension: true,
-            quickfix: true
+            quickfix: true,
+            debug: true,
+            launchConfig: true
         };
         this.app = express();
         this.app.use(express.json());
@@ -134,6 +140,22 @@ export class MCPServer {
                 logger.info('MCP quickfix tools registered successfully');
             } else {
                 logger.info('MCP quickfix tools disabled by configuration');
+            }
+            
+            // Register debug tools if enabled
+            if (this.toolConfig.debug) {
+                registerDebugTools(this.server);
+                logger.info('MCP debug tools registered successfully');
+            } else {
+                logger.info('MCP debug tools disabled by configuration');
+            }
+            
+            // Register launch config tools if enabled
+            if (this.toolConfig.launchConfig) {
+                registerLaunchConfigTools(this.server);
+                logger.info('MCP launch config tools registered successfully');
+            } else {
+                logger.info('MCP launch config tools disabled by configuration');
             }
         } else {
             logger.warn('File listing callback not set during tools setup');
