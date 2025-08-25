@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from 'zod';
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { TypedDebugSession, createTypedDebugSession, toMarkdown } from './debug-types.js';
+import { DebugConsoleBuffer } from './debug-console-buffer.js';
 import { defineTool } from '../utils/types.js';
 
 // Common schemas
@@ -21,6 +22,15 @@ const breakpointTargetSchema = {
 // Common thread-based operation schema
 const threadOperationSchema = {
     threadId: threadIdSchema
+};
+
+// Console output retrieval schema
+const consoleOutputSchema = {
+    sessionId: z.string().optional().describe('Debug session ID to get messages for (defaults to active session)'),
+    category: z.enum(['stdout', 'stderr', 'console', 'all']).optional().default('all').describe('Filter by message category'),
+    search: z.string().optional().describe('Search text to filter messages'),
+    limit: z.number().optional().default(100).describe('Maximum number of messages to return'),
+    offset: z.number().optional().default(0).describe('Number of messages to skip (for pagination)')
 };
 
 /**
@@ -133,7 +143,9 @@ export const tools = {
     
     step_into: defineTool('debug_step_into', threadOperationSchema),
     
-    step_out: defineTool('debug_step_out', threadOperationSchema)
+    step_out: defineTool('debug_step_out', threadOperationSchema),
+    
+    get_console_output: defineTool('debug_get_console_output', consoleOutputSchema)
 };
 
 
@@ -816,6 +828,87 @@ export function registerDebugTools(server: McpServer): void {
             await thread.stepOut();
             const debugStateResult = await thread.waitUntilPausedAndGetState();
             return createResponse(toMarkdown(debugStateResult));
+        }
+    );
+
+    // Add debug_get_console_output tool
+    server.tool(
+        'debug_get_console_output',
+        `Retrieves console output messages from a debug session.
+        
+        WHEN TO USE: Getting debug console output, examining program stdout/stderr during debugging.
+        
+        Returns console messages with filtering and pagination options.`,
+        consoleOutputSchema,
+        async ({ sessionId, category, search, limit, offset }): Promise<CallToolResult> => {
+            // Get the session ID
+            let targetSessionId: string;
+            if (sessionId) {
+                targetSessionId = sessionId;
+            } else {
+                const activeSession = vscode.debug.activeDebugSession;
+                if (!activeSession) {
+                    return createResponse('No debug session is currently active');
+                }
+                targetSessionId = activeSession.id;
+            }
+
+            // Get messages with pagination
+            const buffer = DebugConsoleBuffer.getInstance();
+            const { 
+                messages: allMessages, 
+                totalCount: sessionTotalCount,
+                hasLostMessages,
+                oldestAvailableIndex
+            } = buffer.getMessagesWithPagination(targetSessionId);
+            
+            // Apply category filter
+            let messages = allMessages;
+            if (category && category !== 'all') {
+                messages = messages.filter(msg => msg.category === category);
+            }
+
+            // Apply search filter
+            if (search) {
+                const searchLower = search.toLowerCase();
+                messages = messages.filter(msg => 
+                    msg.output.toLowerCase().includes(searchLower)
+                );
+            }
+
+            // Apply offset/limit pagination after filtering
+            const filteredCount = messages.length;
+            const paginatedMessages = messages.slice(offset, offset + limit);
+
+            if (paginatedMessages.length === 0) {
+                return createResponse(`No console output found (session total: ${sessionTotalCount}, filtered: ${filteredCount})`);
+            }
+
+            // Format the output
+            let result = `Console output for debug session (showing ${paginatedMessages.length} of ${filteredCount} filtered messages, session total: ${sessionTotalCount}):\n\n`;
+            
+            // Add warning if messages were lost
+            if (hasLostMessages) {
+                result += `⚠️ WARNING: Some messages have been lost due to buffer overflow (buffer size: 1000 messages).\n`;
+                if (oldestAvailableIndex !== undefined) {
+                    result += `   Oldest available message index: ${oldestAvailableIndex} (earlier messages have been overwritten)\n\n`;
+                }
+            }
+            
+            for (const msg of paginatedMessages) {
+                const timestamp = new Date(msg.timestamp).toISOString().slice(11, 23); // HH:mm:ss.SSS
+                result += `[${timestamp}] ${msg.category}: ${msg.output}`;
+                if (!msg.output.endsWith('\n')) {
+                    result += '\n';
+                }
+            }
+
+            // Add pagination info if there are more messages
+            if (filteredCount > offset + limit) {
+                result += `\n... ${filteredCount - (offset + limit)} more messages available (use offset: ${offset + limit})`;
+            }
+
+            return createResponse(result.trim());
         }
     );
 }

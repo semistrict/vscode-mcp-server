@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { MCPServer, ToolConfiguration } from './server';
 import { listWorkspaceFiles } from './tools/file-tools';
 import { logger } from './utils/logger';
+import { DebugConsoleBuffer } from './tools/debug-console-buffer';
 
 // Re-export for testing purposes
 export { MCPServer };
@@ -66,8 +67,16 @@ function updateStatusBar(port: number) {
     }
 
     if (serverEnabled) {
-        statusBarItem.text = `$(server) MCP Server: ${port}`;
-        statusBarItem.tooltip = `MCP Server running at localhost:${port} (Click to toggle)`;
+        const config = vscode.workspace.getConfiguration('vscode-mcp-server');
+        const useUnixSocket = config.get<boolean>('useUnixSocket', true);
+        
+        if (useUnixSocket) {
+            statusBarItem.text = `$(server) MCP Server: UDS`;
+            statusBarItem.tooltip = `MCP Server running on Unix socket (Click to toggle)`;
+        } else {
+            statusBarItem.text = `$(server) MCP Server: ${port}`;
+            statusBarItem.tooltip = `MCP Server running at localhost:${port} (Click to toggle)`;
+        }
         statusBarItem.backgroundColor = undefined;
     } else {
         statusBarItem.text = `$(server) MCP Server: Off`;
@@ -153,6 +162,11 @@ async function toggleServerState(context: vscode.ExtensionContext): Promise<void
 export async function activate(context: vscode.ExtensionContext) {
     logger.info('Activating vscode-mcp-server extension');
     logger.showChannel(); // Show the output channel for easy access to logs
+
+    // Initialize the DebugConsoleBuffer early so it can register event listeners
+    // before any debug sessions start
+    DebugConsoleBuffer.getInstance();
+    logger.info('Initialized DebugConsoleBuffer for capturing debug output');
 
     try {
         // Get configuration

@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { DebugProtocol } from '@vscode/debugprotocol';
+import { DebugConsoleBuffer } from './debug-console-buffer.js';
 import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
 
 /**
@@ -22,6 +23,7 @@ export interface DebugStateResult {
     waitTime: number;
     stackTrace?: BodyOf<DebugProtocol.StackTraceResponse>;
     error?: string;
+    consoleMessageCount?: number;
 }
 
 /**
@@ -36,6 +38,14 @@ export function toMarkdown(result: DebugStateResult): string {
     }
     
     markdown += `**Message**:\n${result.message}\n\n`;
+    
+    if (result.consoleMessageCount !== undefined) {
+        if (result.consoleMessageCount > 0) {
+            markdown += `**Console Output**: ${result.consoleMessageCount} message${result.consoleMessageCount === 1 ? '' : 's'} available (use debug_get_console_output to retrieve)\n\n`;
+        } else {
+            markdown += `**Console Output**: No messages\n\n`;
+        }
+    }
     
     if (result.stackTrace && result.stackTrace.stackFrames?.length > 0) {
         markdown += `**Stack Frames** (${result.stackTrace.stackFrames.length} total):\n`;
@@ -381,6 +391,9 @@ export class TypedDebugSession {
         const pollInterval = 50; // 50ms
         const startTime = Date.now();
         
+        // Get console buffer instance
+        const consoleBuffer = DebugConsoleBuffer.getInstance();
+        
         while (Date.now() - startTime < maxWaitTime) {
             try {
                 // Get current stack trace
@@ -397,12 +410,14 @@ export class TypedDebugSession {
                 const line = topFrame.line;
                 
                 if (!source?.path || !line) {
+                    const consoleMessageCount = consoleBuffer.getAllMessages(this.id).length;
                     return {
                         isPaused: true,
                         state: 'paused',
                         message: `Debug session "${this.name}" stopped at ${topFrame.name || 'unknown location'}`,
                         waitTime: Date.now() - startTime,
-                        stackTrace
+                        stackTrace,
+                        consoleMessageCount
                     };
                 }
 
@@ -426,21 +441,25 @@ export class TypedDebugSession {
                         result += `${marker} ${lineNum.toString().padStart(3)}: ${lineText}\n`;
                     }
                     
+                    const consoleMessageCount = consoleBuffer.getAllMessages(this.id).length;
                     return {
                         isPaused: true,
                         state: 'paused',
                         message: result.trim(),
                         waitTime: Date.now() - startTime,
-                        stackTrace
+                        stackTrace,
+                        consoleMessageCount
                     };
                     
                 } catch (fileError) {
+                    const consoleMessageCount = consoleBuffer.getAllMessages(this.id).length;
                     return {
                         isPaused: true,
                         state: 'paused',
                         message: `Stopped at ${source.name}:${line} in function "${topFrame.name}" (source not accessible)`,
                         waitTime: Date.now() - startTime,
                         stackTrace,
+                        consoleMessageCount,
                         error: fileError instanceof Error ? fileError.message : 'unknown file error'
                     };
                 }
@@ -454,22 +473,26 @@ export class TypedDebugSession {
                 }
                 
                 // For other errors, return immediately
+                const consoleMessageCount = consoleBuffer.getAllMessages(this.id).length;
                 return {
                     isPaused: false,
                     state: 'error',
                     message: `Debug session "${this.name}" state unavailable`,
                     waitTime: Date.now() - startTime,
+                    consoleMessageCount,
                     error: errorMsg
                 };
             }
         }
         
         // Timeout reached - thread is running
+        const consoleMessageCount = consoleBuffer.getAllMessages(this.id).length;
         return {
             isPaused: false,
             state: 'running',
             message: `Debug session "${this.name}" is running (thread not paused after ${maxWaitTime}ms)`,
-            waitTime: maxWaitTime
+            waitTime: maxWaitTime,
+            consoleMessageCount
         };
     }
 

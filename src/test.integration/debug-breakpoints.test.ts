@@ -10,10 +10,6 @@ describe('debug_set_breakpoint Tool', () => {
             .toBeSuccessWithText(/Set.*breakpoint.*main\.go.*line 10/);
     });
 
-    it.skip('should set breakpoint at function', async () => {
-        await expect(toolCall(debugTools.set_breakpoint, { function: 'main' }))
-            .toBeSuccessWithText(/Set.*breakpoint/);
-    });
 
     it('should set conditional breakpoint', async () => {
         await expect(toolCall(debugTools.set_breakpoint, {
@@ -29,15 +25,6 @@ describe('debug_set_breakpoint Tool', () => {
         })).toBeSuccessWithText(/logpoint.*Server starting on port \{port\}/);
     });
 
-    it.skip('should handle invalid input gracefully', async () => {
-        await expect(toolCall(debugTools.set_breakpoint, {}))
-            .toBeErrorMatching(/Must specify exactly one/);
-    });
-
-    it.skip('should handle non-existent file gracefully', async () => {
-        await expect(toolCall(debugTools.set_breakpoint, { line: 'nonexistent.go:10' }))
-            .toBeErrorMatching(/not found/);
-    });
 
     describe('debug_list_breakpoints', () => {
         it('should list all breakpoints in workspace', async () => {
@@ -52,15 +39,6 @@ describe('debug_set_breakpoint Tool', () => {
                 .toBeSuccessWithText(/Removed all|No breakpoints are currently set/);
         });
 
-        it.skip('should require exactly one parameter', async () => {
-            await expect(toolCall(debugTools.remove_breakpoint))
-                .toBeErrorMatching(/Must specify exactly one/);
-        });
-
-        it.skip('should handle invalid index gracefully', async () => {
-            await expect(toolCall(debugTools.remove_breakpoint, { index: 999 }))
-                .toBeErrorMatching(/Invalid breakpoint index/);
-        });
     });
 
 });

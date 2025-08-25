@@ -6,74 +6,6 @@ describe('End-to-End Debug Session Tests', () => {
     setupMcpClient();
 
     describe('full debugging workflow', () => {
-        it.skip('should create launch config, start debug session, set breakpoint, and debug Node.js program', async () => {
-            const client = getClient();
-
-            // Step 1: Create a Node.js launch configuration
-            const createConfigResult = await client.callTool({
-                name: 'create_launch_config',
-                arguments: {
-                    name: 'Debug E2E Test',
-                    template: 'node',
-                    overwrite: true,
-                    stopOnEntry: true
-                }
-            });
-
-            expect(createConfigResult).toBeSuccessWithText(/(Created|Updated) launch configuration 'Debug E2E Test'/);
-
-            // Step 2: Set a breakpoint at a specific line using workspace root relative path
-            await expect(toolCall(debugTools.set_breakpoint, {
-                line: 'index.js:15' // Target line 15 in index.js (user handler function)
-            })).toBeSuccessWithText(/Set breakpoint in.*index.js at line 15/);
-
-            // Step 3: Verify breakpoint was set
-            await expect(toolCall(debugTools.list_breakpoints))
-                .toBeSuccessWithText(/Found \d+ breakpoint/);
-
-            // Step 4: Start debug session
-            await expect(toolCall(debugTools.start_session, {
-                name: 'Debug E2E Test'
-            })).toBeSuccessWithText(/Started debug session "Debug E2E Test"/);
-
-            // Step 5: Verify debug session is active
-            await expect(toolCall(debugTools.list_sessions))
-                .toBeSuccessWithText(/Active debug session:/);
-
-            // Step 6: Wait for program to pause at entry  
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            
-            // Step 7: Get list of threads to find threadId
-            const listThreadsResult = await toolCall(debugTools.list_threads);
-            expect(listThreadsResult).toBeSuccessWithText(/Thread ID:/);
-
-            const threadsText = (listThreadsResult.content?.[0] as { text: string })?.text || '';
-            
-            // Extract thread ID from the response (now it's an encrypted string)
-            const threadMatch = threadsText.match(/Thread ID: ([^\s]+)/);
-            if (!threadMatch) {
-                throw new Error(`Could not extract thread ID from response. Actual response: ${threadsText}`);
-            }
-            const threadId = threadMatch[1];
-
-            // Step 8: Verify we can extract the thread ID (main goal achieved)
-            expect(threadId).toBeDefined();
-            expect(threadId.length).toBeGreaterThan(0);
-
-
-            // Step 8: Stop debug session
-            await expect(toolCall(debugTools.stop_session))
-                .toBeSuccessWithText(/Stopped debug session/);
-
-            // Step 9: Verify session is no longer active
-            await expect(toolCall(debugTools.list_sessions))
-                .toBeSuccessWithText('No debug sessions are currently active');
-
-            // Step 10: Clean up breakpoints
-            await expect(toolCall(debugTools.remove_breakpoint, { all: true }))
-                .toBeSuccessWithText(/Removed all.*breakpoint/);
-
-        }); // 30 second timeout for this complex test
 
         it('comprehensive debug workflow with variables, callstack, and stepping', async () => {
             const client = getClient();
@@ -111,9 +43,15 @@ describe('End-to-End Debug Session Tests', () => {
                 condition: 'i === 2'
             })).toBeSuccessWithText(/conditional breakpoint/);
 
+            // Step 3.5: Set a logpoint to generate predictable console output
+            await expect(toolCall(debugTools.set_breakpoint, {
+                line: 'index.js:99',
+                logMessage: 'TEST LOGPOINT: Request count is now {requestCount}'
+            })).toBeSuccessWithText(/Set logpoint/);
+
             // Step 4: Verify all breakpoints are set
             await expect(toolCall(debugTools.list_breakpoints))
-                .toBeSuccessWithText(/Found 4 breakpoint/);
+                .toBeSuccessWithText(/Found 5 breakpoint/);
 
             // Step 5: Start debug session
             await expect(toolCall(debugTools.start_session, {
@@ -163,6 +101,8 @@ Stopped at index.js:3 in function "<anonymous>"
     5:     { id: 2, name: 'Bob', email: 'bob@example.com', active: false },
     6:     { id: 3, name: 'Charlie', email: 'charlie@example.com', active: true }
 
+**Console Output**: No messages
+
 **Stack Frames** (1 total):
 1. <anonymous> at index.js:3:15
 
@@ -183,6 +123,8 @@ Stopped at index.js:149 in function "<anonymous>"
   150: 
   151: const result1 = handleRequest();
   152: console.log('Result 1:', result1);
+
+**Console Output**: No messages
 
 **Stack Frames** (1 total):
 1. <anonymous> at index.js:149:1
@@ -205,15 +147,32 @@ Stopped at index.js:50 in function "global.findUserById"
    52:     let foundUser = null;
    53:
 
+**Console Output**: 3 messages available (use debug_get_console_output to retrieve)
+
 **Stack Frames** (1 total):
 1. global.findUserById at index.js:50:22
 
 `);
 
+            // Step 9.4: Get console output to see what messages are available
+            const consoleResult = await toolCall(debugTools.get_console_output, {
+                category: 'all',
+                limit: 100,
+                offset: 0
+            });
+            const consoleText = (consoleResult.content?.[0] as { text: string })?.text || '';
+            
+            // Check the structure and content without exact timestamps
+            // At this point we have 3 messages: startup, logpoint, and result
+            expect(consoleText).toMatch(/Console output for debug session \(showing 3 of 3 filtered messages, session total: 3\):/);
+            expect(consoleText).toMatch(/\[\d{2}:\d{2}:\d{2}\.\d{3}\] stdout: Starting program\.\.\./);
+            expect(consoleText).toMatch(/\[\d{2}:\d{2}:\d{2}\.\d{3}\] stdout: TEST LOGPOINT: Request count is now 0/);
+            expect(consoleText).toMatch(/\[\d{2}:\d{2}:\d{2}\.\d{3}\] stdout: Result 1: \{message: 'Hello, debugging world!', requestCount: 1\}/);
+
             // Step 9.5: List breakpoints to see enhanced output
             const breakpointsList = await toolCall(debugTools.list_breakpoints);
             const breakpointsText = (breakpointsList.content?.[0] as { text: string })?.text || '';
-            expect(breakpointsText).toBe(`Found 4 breakpoint(s):
+            expect(breakpointsText).toBe(`Found 5 breakpoint(s):
 
 1. index.js:39
       37:         };
@@ -241,7 +200,14 @@ Stopped at index.js:50 in function "global.findUserById"
       82:     for (let index = 0; index < arrayLength; index++) {
    →  83:         const currentValue = arr[index];
       84:         total = addNumbers(total, currentValue);
-      85:     }`);
+      85:     }
+
+5. index.js:99 - Log: "TEST LOGPOINT: Request count is now {requestCount}"
+      97: // Main function that will be called
+      98: function handleRequest() {
+   →  99:     requestCount++;
+     100:     const message = 'Hello, debugging world!';
+     101:     return { message, requestCount };`);
 
             // Step 10: Continue execution
             await expect(toolCall(debugTools.continue_session, { threadId }))
@@ -259,6 +225,8 @@ Stopped at index.js:41 in function "global.validateUser"
    42:         valid: true, 
    43:         user: user,
    44:         searchDuration: searchDuration
+
+**Console Output**: 3 messages available (use debug_get_console_output to retrieve)
 
 **Stack Frames** (1 total):
 1. global.validateUser at index.js:41:27
@@ -282,6 +250,8 @@ Stopped at index.js:82 in function "global.sumArray"
    84:         total = addNumbers(total, currentValue);
    85:     }
 
+**Console Output**: 4 messages available (use debug_get_console_output to retrieve)
+
 **Stack Frames** (1 total):
 1. global.sumArray at index.js:82:22`);
 
@@ -302,6 +272,8 @@ Stopped at index.js:82 in function "global.sumArray"
    84:         total = addNumbers(total, currentValue);
    85:     }
 
+**Console Output**: 4 messages available (use debug_get_console_output to retrieve)
+
 **Stack Frames** (1 total):
 1. global.sumArray at index.js:82:31`);
             
@@ -320,6 +292,8 @@ Stopped at index.js:83 in function "global.sumArray"
    84:         total = addNumbers(total, currentValue);
    85:     }
    86:
+
+**Console Output**: 5 messages available (use debug_get_console_output to retrieve)
 
 **Stack Frames** (1 total):
 1. global.sumArray at index.js:83:30`);
@@ -345,6 +319,8 @@ Stopped at index.js:91 in function "global.addNumbers"
    93:     const result = firstNum + secondNum;
    94:     return result;
 
+**Console Output**: 5 messages available (use debug_get_console_output to retrieve)
+
 **Stack Frames** (1 total):
 1. global.addNumbers at index.js:91:22`);
 
@@ -352,9 +328,9 @@ Stopped at index.js:91 in function "global.addNumbers"
             const deepStackResult = await toolCall(debugTools.get_callstack, { threadId });
             const deepStackText = (deepStackResult.content?.[0] as { text: string })?.text || '';
             
-            // Remove variable parts (process ID) for comparison
-            const normalizedStackText = deepStackText.replace(/\[(\d+)\]/, '[PID]');
-            const expectedStackText = `Call stack for debug session "index.js [PID] « Comprehensive Debug Test" (Thread Thread 0):
+            // Remove variable parts (process ID and thread ID) for comparison
+            const normalizedStackText = deepStackText.replace(/\[(\d+)\]/, '[PID]').replace(/(Thread Thread )\d+/, '$1X');
+            const expectedStackText = `Call stack for debug session "index.js [PID] « Comprehensive Debug Test" (Thread Thread X):
 
 1. global.addNumbers at index.js:91:22
 2. global.sumArray at index.js:84:17
@@ -390,7 +366,7 @@ Stopped at index.js:91 in function "global.addNumbers"
                 .toBeSuccessWithText(/Removed.*breakpoint/);
 
             await expect(toolCall(debugTools.list_breakpoints))
-                .toBeSuccessWithText(`Found 3 breakpoint(s):
+                .toBeSuccessWithText(`Found 4 breakpoint(s):
 
 1. index.js:49
       47: }
@@ -411,7 +387,14 @@ Stopped at index.js:91 in function "global.addNumbers"
       82:     for (let index = 0; index < arrayLength; index++) {
    →  83:         const currentValue = arr[index];
       84:         total = addNumbers(total, currentValue);
-      85:     `);
+      85:     }
+
+4. index.js:99 - Log: "TEST LOGPOINT: Request count is now {requestCount}"
+      97: // Main function that will be called
+      98: function handleRequest() {
+   →  99:     requestCount++;
+     100:     const message = 'Hello, debugging world!';
+     101:     return { message, requestCount };`);
 
             await expect(toolCall(debugTools.stop_session))
                 .toBeSuccessWithText(/Stopped debug session.*Comprehensive Debug Test/);

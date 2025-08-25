@@ -45,6 +45,7 @@ fi
 TIMESTAMP=$(date +%s)
 USER_DATA_DIR="$(cd "$PROJECT_ROOT" && pwd)/.tmp/vscode-user-data-$TIMESTAMP"
 PID_FILE="$(cd "$PROJECT_ROOT" && pwd)/.tmp/vscode.pid"
+SOCKET_PATH="$(cd "$PROJECT_ROOT" && pwd)/.tmp/mcp-server.sock"
 
 # Kill any existing VS Code instance using our test user data directory pattern
 echo "🔄 Killing any existing test VS Code instance..."
@@ -58,40 +59,43 @@ if [ -f "$PID_FILE" ]; then
 fi
 /usr/bin/pkill -9 -f "$USER_DATA_DIR" 2>/dev/null || true
 
-# Clean old user data directories to ensure fresh state
-echo "🧹 Cleaning old user data directories..."
+# Clean old user data directories and socket files to ensure fresh state
+echo "🧹 Cleaning old user data directories and socket files..."
 rm -rf "$PROJECT_ROOT/.tmp/vscode-user-data"*
+rm -f "$PROJECT_ROOT/.tmp/mcp-server.sock"
 
-mkdir -p "$USER_DATA_DIR"
+mkdir -p "$USER_DATA_DIR/User"
+
+# Copy template settings to VS Code user data directory
+echo "🔧 Copying template settings..."
+cp "$PROJECT_ROOT/template/settings.json" "$USER_DATA_DIR/User/settings.json"
 
 # Node.js debugging is built into VS Code by default
 echo "📦 Node.js debugging is built into VS Code - no extension installation needed"
 
-# Launch VS Code with the extension in development mode and capture PID
+# Set environment variable for Unix domain socket
+export VSCODE_MCP_SOCKET="$SOCKET_PATH"
+echo "🔌 Setting VSCODE_MCP_SOCKET=$VSCODE_MCP_SOCKET"
+
+# Launch VS Code with the extension in development mode
 code \
     --extensionDevelopmentPath="$EXTENSION_DIR" \
     --disable-workspace-trust \
     --user-data-dir="$USER_DATA_DIR" \
-    "$TEST_FIXTURES_DIR" &
+    "$TEST_FIXTURES_DIR"
 
-# Get the PID of the launched VS Code process
-VSCODE_PID=$!
-echo "$VSCODE_PID" > "$PID_FILE"
-echo "   VS Code launched with PID $VSCODE_PID"
+# Find the actual VS Code process using the user data directory
+VSCODE_PID=$(pgrep -f "$USER_DATA_DIR" | head -1)
 
-# Wait for the process to actually start
-sleep 2
-
-# Find the actual VS Code process (code launches a wrapper)
-ACTUAL_PID=$(/usr/bin/pgrep -f "$USER_DATA_DIR" | head -1)
-if [ -n "$ACTUAL_PID" ]; then
-    echo "$ACTUAL_PID" > "$PID_FILE"
-    echo "   Actual VS Code PID: $ACTUAL_PID"
-else
+# Verify we found a PID
+if [ -z "$VSCODE_PID" ]; then
     echo "❌ Error: Could not determine VS Code process PID"
     echo "   VS Code may have failed to start or crashed immediately"
     exit 1
 fi
+
+echo "$VSCODE_PID" > "$PID_FILE"
+echo "   VS Code launched with PID $VSCODE_PID"
 
 echo "✅ VS Code launched! The extension is now running in development mode."
 echo ""
@@ -100,12 +104,9 @@ echo "🔄 Waiting for MCP server to start (should be automatic)..."
 # Wait longer for the server to start (extension installation can be slow)
 for i in {1..15}; do
     sleep 3
-    echo "   Attempt $i/15: Testing connection to http://localhost:11331/mcp"
+    echo "   Attempt $i/15: Testing connection to Unix socket $SOCKET_PATH"
     
-    if curl -s -X POST http://localhost:11331/mcp \
-        -H 'Content-Type: application/json' \
-        -d '{"jsonrpc":"2.0","method":"tools/list","id":1}' \
-        --connect-timeout 3 > /dev/null 2>&1; then
+    if [ -S "$SOCKET_PATH" ] && echo '{"jsonrpc":"2.0","method":"tools/list","id":1}' | nc -U "$SOCKET_PATH" -w 3 > /dev/null 2>&1; then
         echo "   ✅ Server is responding!"
         break
     fi
@@ -113,18 +114,16 @@ for i in {1..15}; do
     if [ $i -eq 15 ]; then
         echo "   ❌ Server not responding after 45 seconds"
         echo "   💡 Check VS Code status bar or manually enable the server"
+        echo "   💡 Socket file exists: $([ -S "$SOCKET_PATH" ] && echo "Yes" || echo "No")"
         exit 1
     fi
 done
 
 echo ""
 echo "🧪 Testing MCP server with tools/list request:"
-curl -X POST http://localhost:11331/mcp \
-    -H 'Content-Type: application/json' \
-    -d '{"jsonrpc":"2.0","method":"tools/list","id":1}' \
-    2>/dev/null | python3 -m json.tool || echo "Server not responding or invalid JSON response"
+echo '{"jsonrpc":"2.0","method":"tools/list","id":1}' | nc -U "$SOCKET_PATH" 2>/dev/null | python3 -m json.tool || echo "Server not responding or invalid JSON response"
 
 echo ""
 echo "📋 Manual testing commands:"
-echo "   List tools: curl -X POST http://localhost:11331/mcp -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"tools/list\",\"id\":1}'"
-echo "   Test list_files: curl -X POST http://localhost:11331/mcp -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"list_files_code\",\"arguments\":{\"path\":\"\"}},\"id\":1}'"
+echo "   List tools: echo '{\"jsonrpc\":\"2.0\",\"method\":\"tools/list\",\"id\":1}' | nc -U $SOCKET_PATH"
+echo "   Test list_files: echo '{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"list_files_code\",\"arguments\":{\"path\":\"\"}},\"id\":1}' | nc -U $SOCKET_PATH"

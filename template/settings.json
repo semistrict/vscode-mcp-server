@@ -1,0 +1,13 @@
+{
+    "debug.focusWindowOnBreak": false,
+    "debug.focusEditorOnBreak": false,
+    "debug.openDebug": "neverOpen",
+    "workbench.editor.enablePreview": false,
+    "workbench.editor.enablePreviewFromQuickOpen": false,
+    "workbench.editor.revealIfOpen": true,
+    "window.restoreFullscreen": true,
+    "window.restoreWindows": "preserve",
+    "telemetry.telemetryLevel": "off",
+    "update.mode": "none",
+    "workbench.colorTheme": "Default High Contrast"
+}

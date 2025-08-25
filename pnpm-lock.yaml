@@ -8,9 +8,6 @@ importers:
 
   .:
     dependencies:
-      '@modelcontextprotocol/inspector':
-        specifier: github:modelcontextprotocol/inspector
-        version: https://codeload.github.com/modelcontextprotocol/inspector/tar.gz/f22aa1f5e281a4d5558f7e7414d3829aefd51954(@types/node@20.19.11)(typescript@5.9.2)
       '@modelcontextprotocol/sdk':
         specifier: ^1.17.4
         version: 1.17.4
@@ -27,6 +24,9 @@ importers:
         specifier: ^3.22.4
         version: 3.25.76
     devDependencies:
+      '@modelcontextprotocol/inspector':
+        specifier: github:modelcontextprotocol/inspector
+        version: https://codeload.github.com/modelcontextprotocol/inspector/tar.gz/f22aa1f5e281a4d5558f7e7414d3829aefd51954(@types/node@20.19.11)(typescript@5.9.2)
       '@types/mocha':
         specifier: ^10.0.10
         version: 10.0.10

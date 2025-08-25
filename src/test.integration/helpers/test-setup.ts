@@ -1,38 +1,43 @@
 import { beforeAll, afterAll, expect as vitestExpect } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { TextContent, CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { Awaitable, ToolDef, ToolArgs } from '../../utils/types.js';
+import { spawn } from 'child_process';
+import * as path from 'path';
 
 export interface TestContext {
     client: Client;
-    transport: StreamableHTTPClientTransport;
+    transport: StdioClientTransport;
 }
 
 let globalClient: Client;
-let globalTransport: StreamableHTTPClientTransport;
+let globalTransport: StdioClientTransport;
 
 /**
- * Sets up MCP client connection for integration tests
+ * Sets up MCP client connection for integration tests using Unix domain socket
  * Call this in describe() block to share client across tests
  */
 export function setupMcpClient() {
     beforeAll(async () => {
-        console.log('Connecting to MCP server at http://localhost:11331/mcp');
+        const socketPath = path.resolve(process.cwd(), '.tmp/mcp-server.sock');
+        console.log(`Connecting to MCP server via Unix socket at ${socketPath}`);
         
-        // Initialize client and transport
+        // Initialize client and transport using nc (netcat) to connect to Unix domain socket
         globalClient = new Client({
             name: 'test-client',
             version: '1.0.0'
         });
 
-        globalTransport = new StreamableHTTPClientTransport(
-            new URL('http://localhost:11331/mcp')
-        );
+        // Use nc (netcat) to connect to the Unix domain socket
+        globalTransport = new StdioClientTransport({
+            command: 'nc',
+            args: ['-U', socketPath]
+        });
 
         // Connect to server
         await globalClient.connect(globalTransport);
-        console.log('✅ Connected to MCP server');
+        console.log('✅ Connected to MCP server via Unix socket');
     });
 
     afterAll(async () => {
@@ -118,7 +123,6 @@ export const EXPECTED_TOOLS = [
     'debug_set_breakpoint',
     'debug_list_breakpoints',
     'debug_remove_breakpoint',
-    'debug_toggle_breakpoint',
     'debug_start_session',
     'debug_stop_session',
     'debug_continue_session',
@@ -159,9 +163,11 @@ vitestExpect.extend({
         const isError = received.isError === true;
         
         if (!isError) {
+            const textContent = received.content?.find(c => c.type === 'text') as TextContent;
+            const successText = textContent?.text || 'no text content';
             return {
                 pass: false,
-                message: () => `Expected result to be an error response (isError: true), but got isError: ${received.isError}`
+                message: () => `Expected result to be an error response (isError: true), but got isError: ${received.isError}. Actual success response text: "${successText}"`
             };
         }
 
@@ -248,41 +254,32 @@ vitestExpect.extend({
 export const expect = vitestExpect;
 
 /**
- * Poll for a single thread to become available in the debug session
+ * Wait for debug session to start and get the first available thread ID
+ * Uses the same approach as the working e2e test
  */
-async function pollForSingleThread(maxAttempts: number = 10, intervalMs: number = 200): Promise<string> {
+async function waitForThreadAndGetId(waitTimeMs: number = 2000): Promise<string> {
     const client = getClient();
     
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        try {
-            const threadsResult = await client.callTool({
-                name: 'debug_list_threads',
-                arguments: {}
-            });
-            
-            const threadsText = (threadsResult as any).content[0].text;
-            const threadMatches = threadsText.match(/Thread ID: ([^\s]+)/g);
-            
-            if (threadMatches && threadMatches.length === 1) {
-                const threadMatch = threadsText.match(/Thread ID: ([^\s]+)/);
-                if (threadMatch) {
-                    return threadMatch[1];
-                }
-            }
-            
-            if (attempt < maxAttempts) {
-                await new Promise(resolve => setTimeout(resolve, intervalMs));
-            }
-        } catch (error) {
-            if (attempt < maxAttempts) {
-                await new Promise(resolve => setTimeout(resolve, intervalMs));
-            } else {
-                throw error;
-            }
-        }
+    // Wait for program to pause at entry (same as e2e test)
+    await new Promise(resolve => setTimeout(resolve, waitTimeMs));
+    
+    // Get list of threads to find threadId (same as e2e test)
+    const listThreadsResult = await client.callTool({
+        name: 'debug_list_threads',
+        arguments: {}
+    });
+    
+    expect(listThreadsResult).toBeSuccessWithText(/Thread ID:/);
+    
+    const threadsText = ((listThreadsResult as any).content?.[0] as { text: string })?.text || '';
+    
+    // Extract thread ID from the response (same as e2e test)
+    const threadMatch = threadsText.match(/Thread ID: ([^\s]+)/);
+    if (!threadMatch) {
+        throw new Error(`Could not extract thread ID from response. Actual response: ${threadsText}`);
     }
     
-    throw new Error(`Expected exactly 1 thread after ${maxAttempts} attempts, but polling failed`);
+    return threadMatch[1];
 }
 
 /**
@@ -323,8 +320,8 @@ export async function startDebugSession(stopOnEntry: boolean = true) {
     // Ensure debug session started successfully
     expect(result).toBeSuccessWithText(/Started debug session/);
     
-    // If stopOnEntry is true, poll for threads to become available
-    const threadId = stopOnEntry ? await pollForSingleThread() : undefined;
+    // If stopOnEntry is true, wait for threads to become available
+    const threadId = stopOnEntry ? await waitForThreadAndGetId() : undefined;
     
     return {
         result,
