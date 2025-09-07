@@ -1,0 +1,219 @@
+#!/bin/bash
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+WORKSPACE_DIR="$(pwd)"
+EXTENSION_DIR="$PROJECT_ROOT"
+USE_ISOLATED=false
+USE_CODE_SERVER=false
+NO_CLEANUP=false
+VSCODE_PID=""
+VSCODE_CMD="code"
+
+# Cleanup function to kill VS Code/code-server on exit
+cleanup() {
+    if [ "$NO_CLEANUP" = true ]; then
+        echo "[INFO] Skipping cleanup (--no-cleanup flag set)" >&2
+        echo "[INFO] User data dir: $USER_DATA_DIR" >&2
+        echo "[INFO] Socket path: $SOCKET_PATH" >&2
+        echo "[INFO] Process PID: $VSCODE_PID" >&2
+        return
+    fi
+    
+    if [ -n "$VSCODE_PID" ]; then
+        echo "[DEBUG] Cleaning up $VSCODE_CMD process (PID: $VSCODE_PID)..." >&2
+        kill "$VSCODE_PID" 2>/dev/null || true
+        # Wait a moment for process to exit
+        sleep 1
+        # Force kill if still running
+        kill -9 "$VSCODE_PID" 2>/dev/null || true
+    fi
+    if [ "$USE_ISOLATED" = true ]; then
+        if [ -n "$USER_DATA_DIR" ]; then
+            echo "[DEBUG] Removing isolated user data dir: $USER_DATA_DIR" >&2
+            rm -rf "$USER_DATA_DIR"
+        fi
+        if [ -n "$SOCKET_PATH" ]; then
+            echo "[DEBUG] Removing isolated socket: $SOCKET_PATH" >&2
+            rm -f "$SOCKET_PATH"
+        fi
+    fi
+}
+
+# Set up trap to clean up on exit
+trap cleanup EXIT INT TERM
+
+# Parse arguments
+for arg in "$@"; do
+    if [ "$arg" = "--isolated" ]; then
+        USE_ISOLATED=true
+    elif [ "$arg" = "--code-server" ]; then
+        USE_CODE_SERVER=true
+        VSCODE_CMD="code-server"
+    elif [ "$arg" = "--no-cleanup" ]; then
+        NO_CLEANUP=true
+    fi
+done
+
+# Set up VS Code arguments
+if [ "$USE_CODE_SERVER" = true ]; then
+    # code-server doesn't support extensionDevelopmentPath
+    # We'll need to install the extension from VSIX
+    # Also need to specify a random port to avoid conflicts
+    RANDOM_PORT=$((10000 + RANDOM % 40000))
+    VSCODE_ARGS=(
+        "--bind-addr=127.0.0.1:$RANDOM_PORT"
+        "--disable-workspace-trust"
+        "$WORKSPACE_DIR"
+    )
+    echo "[DEBUG] Code-server will use port: $RANDOM_PORT" >&2
+else
+    # Regular VS Code supports extensionDevelopmentPath
+    VSCODE_ARGS=(
+        "--extensionDevelopmentPath=$EXTENSION_DIR"
+        "--disable-workspace-trust"
+        "$WORKSPACE_DIR"
+    )
+fi
+
+# Only use custom user data dir if --isolated flag is passed
+if [ "$USE_ISOLATED" = true ]; then
+    # Generate random directory name
+    RANDOM_ID=$(openssl rand -hex 8)
+    USER_DATA_DIR="$HOME/.vscode-mcp/isolated-$RANDOM_ID"
+    echo "[DEBUG] Using isolated user data dir: $USER_DATA_DIR" >&2
+    mkdir -p "$USER_DATA_DIR"
+    VSCODE_ARGS+=("--user-data-dir=$USER_DATA_DIR")
+    
+    # Set explicit socket path for isolated mode
+    SOCKET_PATH="$HOME/.vscode-mcp/isolated-$RANDOM_ID.sock"
+    export VSCODE_MCP_SOCKET="$SOCKET_PATH"
+    echo "[DEBUG] Using isolated socket: $SOCKET_PATH" >&2
+    
+    # In isolated mode, copy template settings
+    SETTINGS_DIR="$USER_DATA_DIR/User"
+    mkdir -p "$SETTINGS_DIR"
+    
+    if [ "$USE_CODE_SERVER" = true ]; then
+        # For code-server, we need to write MCP settings since env vars don't propagate
+        cat > "$SETTINGS_DIR/settings.json" <<EOF
+{
+    "vscode-mcp-server.useUnixSocket": true,
+    "vscode-mcp-server.socketPath": "$SOCKET_PATH",
+    "vscode-mcp-server.defaultEnabled": true
+}
+EOF
+        echo "[DEBUG] Created settings.json with socket path: $SOCKET_PATH" >&2
+    else
+        # For regular VS Code, copy template settings (like test script does)
+        if [ -f "$PROJECT_ROOT/template/settings.json" ]; then
+            cp "$PROJECT_ROOT/template/settings.json" "$SETTINGS_DIR/settings.json"
+            echo "[DEBUG] Copied template settings to isolated user data dir" >&2
+        fi
+    fi
+else
+    echo "[DEBUG] Using default VS Code user data dir" >&2
+fi
+
+echo "[DEBUG] Script starting..." >&2
+echo "[DEBUG] PROJECT_ROOT: $PROJECT_ROOT" >&2
+echo "[DEBUG] WORKSPACE_DIR: $WORKSPACE_DIR" >&2
+
+mkdir -p "$HOME/.vscode-mcp"
+
+cd "$PROJECT_ROOT"
+echo "[DEBUG] Compiling extension..." >&2
+npm run compile >&2
+
+# For code-server, we need to package and install the extension
+if [ "$USE_CODE_SERVER" = true ]; then
+    echo "[DEBUG] Building VSIX for code-server..." >&2
+    npm run package >&2
+    
+    # Find the latest VSIX file
+    VSIX_FILE=$(ls -t *.vsix 2>/dev/null | head -n1)
+    
+    if [ -z "$VSIX_FILE" ]; then
+        echo "[ERROR] Failed to build VSIX file" >&2
+        exit 1
+    fi
+    
+    echo "[DEBUG] Installing extension from $VSIX_FILE..." >&2
+    # Install the extension (code-server needs different args)
+    if [ "$USE_ISOLATED" = true ]; then
+        $VSCODE_CMD --install-extension "$PROJECT_ROOT/$VSIX_FILE" --force --user-data-dir="$USER_DATA_DIR" >&2
+    else
+        $VSCODE_CMD --install-extension "$PROJECT_ROOT/$VSIX_FILE" --force >&2
+    fi
+fi
+
+echo "[DEBUG] Starting $VSCODE_CMD..." >&2
+
+if [ "$USE_CODE_SERVER" = true ]; then
+    # Start code-server in background
+    $VSCODE_CMD "${VSCODE_ARGS[@]}" >&2 &
+    VSCODE_PID=$!
+    echo "[DEBUG] Started code-server with PID: $VSCODE_PID" >&2
+    
+    # Wait a bit for code-server to start
+    sleep 3
+    
+    # Check if process is still running
+    if ! kill -0 $VSCODE_PID 2>/dev/null; then
+        echo "[ERROR] code-server failed to start" >&2
+        exit 1
+    fi
+    
+    echo "[INFO] Code-server is running on http://127.0.0.1:$RANDOM_PORT" >&2
+    
+    # Open browser to code-server URL
+    echo "[DEBUG] Opening browser..." >&2
+    open "http://127.0.0.1:$RANDOM_PORT" || true
+else
+    # Regular VS Code launches and returns immediately
+    $VSCODE_CMD "${VSCODE_ARGS[@]}" >&2
+    
+    # In isolated mode, track the VS Code process
+    if [ "$USE_ISOLATED" = true ]; then
+        # Wait a moment for VS Code to start
+        sleep 2
+        
+        # Find the process using the unique user data dir
+        VSCODE_PID=$(pgrep -f "user-data-dir=$USER_DATA_DIR" | head -n1)
+        
+        if [ -n "$VSCODE_PID" ]; then
+            echo "[DEBUG] Found $VSCODE_CMD process with PID: $VSCODE_PID" >&2
+        else
+            echo "[WARNING] Could not find $VSCODE_CMD process" >&2
+        fi
+    fi
+fi
+
+# Determine socket path based on mode
+if [ "$USE_ISOLATED" != true ]; then
+    # In non-isolated mode, compute socket path from workspace
+    PROJECT_DIR_ESCAPED=$(echo "$WORKSPACE_DIR" | sed 's|/|-|g')
+    SOCKET_PATH="$HOME/.vscode-mcp/projects/$PROJECT_DIR_ESCAPED/vscode-mcp.sock"
+fi
+
+
+echo "[DEBUG] Waiting for socket: $SOCKET_PATH" >&2
+
+for i in {1..15}; do
+    sleep 3
+    
+    echo "[DEBUG] Checking socket (attempt $i/15)..." >&2
+    if [ -S "$SOCKET_PATH" ] && echo '{"jsonrpc":"2.0","method":"tools/list","id":1}' | nc -U "$SOCKET_PATH" -w 3 > /dev/null 2>&1; then
+        echo "[DEBUG] Socket is ready!" >&2
+        break
+    fi
+    
+    if [ $i -eq 15 ]; then
+        echo "[ERROR] Socket not ready after 15 attempts" >&2
+        exit 1
+    fi
+done
+
+nc -U "$SOCKET_PATH"

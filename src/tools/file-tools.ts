@@ -3,6 +3,7 @@ import * as path from 'path';
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from 'zod';
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { ToolDef } from '../utils/types.js';
 
 // Type for file listing results
 export type FileListingResult = Array<{path: string, type: 'file' | 'directory'}>;

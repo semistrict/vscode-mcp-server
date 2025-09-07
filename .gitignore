@@ -1,8 +1,9 @@
 out
 dist
 node_modules
-.vscode-test/
+/.vscode-test/
 *.vsix
 .serena
-plans
-CLAUDE.md
+/plans
+CLAUDE.local.md
+/.tmp
